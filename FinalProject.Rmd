@@ -5,13 +5,9 @@ date: "March 9, 2020"
 output: html_document
 ---
 
-#<strong> Somerville Happiness Dataset
+#<strong> Somerville Happiness Dataset </strong>
 
-### A. Brief Overview/Background of Data </strong>
-<p> Add description of features </p>
-
-
-###<strong> B. Analysis </strong>
+###<strong> Analysis </strong>
 
 #### Import Packages
 ```{r message=FALSE}
@@ -249,14 +245,14 @@ for(i in 1:K){
   error_rate_reduced[i] <- error_rate
 }
 ```
-#### Results
+#### <strong> Results </strong>
 
 ##### 1. 5-Fold CV error rate for Full Model
 ```{r}
 mean(error_rate_full)
 ```
 
-##### 1. 5-Fold CV error rate for Reduced Model
+##### 2. 5-Fold CV error rate for Reduced Model
 ```{r}
 mean(error_rate_reduced)
 ```
