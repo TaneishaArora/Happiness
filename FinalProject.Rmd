@@ -1,0 +1,262 @@
+---
+title: "Final Project"
+author: "Anjali Krishnan, Julian Freedburg, Taneisha Arora"
+date: "March 9, 2020"
+output: html_document
+---
+
+#<strong> Somerville Happiness Dataset
+
+### A. Brief Overview/Background of Data </strong>
+<p> Add description of features </p>
+
+
+###<strong> B. Analysis </strong>
+
+#### Import Packages
+```{r message=FALSE}
+library(tidyverse)
+library(rstan)
+library(rstanarm)
+library(bayesplot)
+library(loo)
+
+# Setting seed.
+set.seed(84735)
+```
+
+#### Read in and preprocess dataset
+```{r}
+# Reading data
+happiness <- read_csv("data/happiness.csv")
+
+# Rename fields
+names(happiness) <- c("happy",
+               "city_info", 
+               "housing",
+               "school",
+               "police",
+               "infrastructure",
+               "community")
+
+# Add key field to uniquely identify each record (makes spliting data easier)
+happiness$key = 1:nrow(happiness)
+```
+
+#### Create train-test splits
+```{r}
+K = 5
+
+# We will use K-fold (K = 5) cross validation, so we need 5 splits
+groups <- kfold_split_random(K = K, N = nrow(happiness))
+
+# Each hold out (test set)
+print(table(groups))
+
+# Append test group column to dataset
+happiness <- happiness %>% mutate(test_group = groups)
+```
+#### Some helper functions
+
+##### 1. Compute PI from log odds (inverse logit)
+```{r}
+calc_pi <- function(log_odds){
+  return (exp(log_odds)/(1+exp(log_odds)))
+}
+```
+
+##### 2. Sample from a Bernoulli distribution with PI = p
+```{r}
+get_pred <- function(p){
+  return (sample(c(0,1), 1, prob=c(1-p, p)))
+}
+```
+
+
+##### 3. Function to transform trained rstan logit model into D by N dataframe, where D = num iterations = 4*5000 and N = # of factors in model
+```{r}
+transform_estimates <- function(logit_model){
+  # Transform fit object to get a data frame of parameter estimates
+  # model_estimates will be a dataframe with D rows (D = num iterations = 4*5000)
+  # and N columns (N = # of factors in model)
+  model_estimates <- as.array(logit_model) %>%
+  reshape2::melt() %>% 
+  pivot_wider(names_from=parameters, values_from=value)
+  
+  return(model_estimates)
+}
+```
+
+#### <strong>Training and testing two different logit models</strong>
+
+##### Model specs
+```{r}
+model_full <-  "
+data {
+  int<lower=0> n;
+  int<lower=0, upper=1> Y[n];
+  vector[n] X1;
+  vector[n] X2;
+  vector[n] X3;
+  vector[n] X4;
+  vector[n] X5;
+  vector[n] X6;
+
+}
+
+parameters {
+  real beta0;
+  real beta1;
+  real beta2;
+  real beta3;
+  real beta4;
+  real beta5;
+  real beta6;
+}
+
+model {
+  Y ~ bernoulli_logit(beta0 + beta1 * X1 + beta2 * X2 + beta3 * X3 + beta4 * X4 + beta5 * X5 + beta6 * X6);
+  beta1 ~ normal(0, 2.5);
+  beta2 ~ normal(0, 2.5);
+  beta3 ~ normal(0, 2.5);
+  beta4 ~ normal(0, 2.5);
+  beta5 ~ normal(0, 2.5);
+  beta6 ~ normal(0, 2.5);
+}
+"
+
+model_reduced <- "
+data {
+  int<lower=0> n;
+  int<lower=0, upper=1> Y[n];
+  vector[n] X1;
+}
+
+parameters {
+  real beta0;
+  real beta1;
+}
+
+model {
+  Y ~ bernoulli_logit(beta0 + beta1 * X1);
+  beta1 ~ normal(0, 2.5);
+}
+"
+```
+
+#### Train and test model on 5 folds
+```{r}
+# Helper function to compute logit score for a given data point with each draw from the 
+# predictive posterior distribution
+get_trend_full <- function(x, model_estimates){
+  estimates <- model_estimates %>%
+    mutate(log_odds = beta0 + beta1*x$city_info + beta2*x$housing + beta3*x$school + beta4*x$police + beta5*x$infrastructure + beta6*x$community) %>%
+    mutate(p_y = calc_pi(log_odds))
+  return(estimates)
+}
+
+get_trend_reduced <- function(x, model_estimates){
+  estimates <- model_estimates %>%
+    mutate(log_odds = beta0 + beta1*x$city_info) %>%
+    mutate(p_y = calc_pi(log_odds))
+  return(estimates)
+}
+```
+
+##### <strong>Full Model</strong>
+```{r}
+error_rate_full <- replicate(K, 0)
+
+for(i in 1:K){
+  # test train split
+  train <- happiness %>% filter(groups != i)
+  test <- happiness %>% filter(groups == i)
+  
+  # fit the model
+  # create posterior predictive distribution
+  log_reg_sim <- stan(
+  model_code = model_full,
+  data = list(Y = train$happy,
+              X1 = train$city_info, 
+              X2 = train$housing, 
+              X3 = train$school, 
+              X4 = train$police, 
+              X5 = train$infrastructure, 
+              X6 = train$community, 
+              n = nrow(train)),
+  chains = 4,
+  iter = 5000 * 2
+)
+  
+  # Transform estimates into dataframe
+  beta_estimates <- transform_estimates(log_reg_sim)
+  
+  
+  # pred_test is a D*N matrix where D = num iterations and N = num of observations in test  
+  # data think of pred_test as the output from the rstanarm posterior_predict function.
+  pred_test <- data.frame(matrix(nrow = nrow(beta_estimates), ncol = nrow(test)))
+  colnames(pred_test) <- 1:nrow(test)
+  for(j in 1:nrow(test)){
+    logit_scores <- get_trend_full(test[j,], beta_estimates)
+    pred_test[[j]] <- unlist(map(logit_scores$p_y, get_pred))
+  }
+  
+  # compute error rate
+  predictions <- apply(as.matrix(pred_test), 2, median)
+  error_rate <- 1 - sum(predictions == test$happy)/nrow(test)
+  print(error_rate)
+  error_rate_full[i] <- error_rate
+}
+mean(error_rate_full)
+```
+##### <strong>Reduced Model</strong>
+```{r}
+error_rate_reduced <- replicate(K, 0)
+
+for(i in 1:K){
+  # test train split
+  train <- happiness %>% filter(groups != i)
+  test <- happiness %>% filter(groups == i)
+  
+  # fit the model
+  # create posterior predictive distribution
+  log_reg_sim <- stan(
+  model_code = model_reduced,
+  data = list(Y = train$happy,
+              X1 = train$city_info, 
+              n = nrow(train)),
+  chains = 4,
+  iter = 5000 * 2
+  )
+  
+  # Transform estimates into dataframe
+  beta_estimates <- transform_estimates(log_reg_sim)
+  
+  
+  # pred_test is a D*N matrix where D = num iterations and N = num of observations in test  
+  # data think of pred_test as the output from the rstanarm posterior_predict function.
+  pred_test <- data.frame(matrix(nrow = nrow(beta_estimates), ncol = nrow(test)))
+  colnames(pred_test) <- 1:nrow(test)
+  for(j in 1:nrow(test)){
+    logit_scores <- get_trend_reduced(test[j,], beta_estimates)
+    pred_test[[j]] <- unlist(map(logit_scores$p_y, get_pred))
+  }
+  
+  # compute error rate
+  predictions <- apply(as.matrix(pred_test), 2, median)
+  error_rate <- 1 - sum(predictions == test$happy)/nrow(test)
+  print(error_rate)
+  error_rate_reduced[i] <- error_rate
+}
+```
+#### Results
+
+##### 1. 5-Fold CV error rate for Full Model
+```{r}
+mean(error_rate_full)
+```
+
+##### 1. 5-Fold CV error rate for Reduced Model
+```{r}
+mean(error_rate_reduced)
+```
